@@ -30,15 +30,10 @@
 #       * yum check-update
 #    
 
-# TODO -- handle edge cases:
-#     - failed to connect to site
-#     - got non-200 return code
-#     - failed to parse HTML
-#     - HTML in unexpected format
-#       - at list level
-#       - at post level
-#       - at RHSA announcement level (if I check that)
 
+import os
+import sys
+import logging
 import re
 from datetime import date, timedelta
 from collections import namedtuple
@@ -50,12 +45,17 @@ except ImportError:
     from BeautifulSoup import BeautifulSoup
 
 #### BEGIN public constants
+version = '1.0'
 severities = [
   'critical'
   ,'important'
   ,'moderate'
   ,'low'
 ]
+
+headers  = {
+  'User-Agent' : 'CESA List Spider/' + version
+}
 #### END public constants
 
 #### BEGIN private constants (here for efficiency reasons
@@ -69,23 +69,76 @@ cesa_re_str = r'\[CentOS-announce]\s(CESA-\d+:\d+)\s(\w+)\sCentOS\s(\d+)\s((?:\w
 cesa_regex = re.compile(cesa_re_str)
 #### END private constants
 
+corrections = []
+
 class CESA:
-  def __init__(self, cesa_id, centos_version, severity, pkg_name, date, url):
-    self.exceptions = []
-    self.cesa_id = cesa_id
-    self.centos_version = centos_version
+  def __init__(self):
+    self.cesa_id = None
+    self.centos_version = None
+    self.date = None
+    self.pkg_name = None
+    self.url = None
+    self.severity = None
+  def finalize(self):
+    if None in [self.cesa_id
+            ,self.centos_version
+            ,self.date
+            ,self.pkg_name
+            ,self.url
+            ,self.severity]:
+      logging.critical('attempted to finalize CESA: {}'.format(self))
+      sys.exit(os.EX_SOFTWARE)
+    return self
+
+  def set_severity(self, severity):
     if severity in severities:
       self.severity = severity
-    elif severity == 'moderte':
-      # this is a known typo in a few places
-      self.severity = 'moderate'
     else:
-      self.severity = severity
-      # TODO -- append an exception to self.exceptions
-    self.date = date
-    self.pkg_name = pkg_name
-    self.url = url
+      logging.warning("CESA with ID '{}' had the unrecognized severity level '{}'"
+                      .format(self.cesa_id, self.severity))
+      if 'severity' in corrections:
+        self.severity = self.correct_severity(severity)
+      else:
+        self.severity = severity
+    
+  def set_date(self, year, month):
+    logging.debug("retrieving page for '{}' at URL '{}'"
+                  .format(self.cesa_id, self.url))
+    body = self._get_page()
+    day = cesa_date_regex.match(body.i.string)
+    if not day:
+      logging.critical("Date not found on webpage for {}".formatcesa_id)
+      sys.exit(os.EX_NOTFOUND)
+    self.date = date(year, month, int(day.group(1)))
+    return self
+  def _get_page(self):
+    try:
+      req = urllib2.Request(self.url, headers=headers)
+      response = urllib2.urlopen(req)
+      if response.getcode() == 200:
+          return BeautifulSoup(response.read(), 'html.parser').body
+      logging.critical("CESA associated with URL '{}' yielded non-200 HTTP response".format(self.url))
+      sys.exit(os.EX_NOTFOUND)
+    except Exception, e:
+      logging.critical('Exception: {}'.format(str(e)))
+      sys.exit(os.EX_UNAVAILABLE)
+
+
+  def correct_severity(self, severity):
+    result = severity
+    if severity == 'moderte':
+      result = 'moderate'
+    if severity is result:
+      logging.error("CESA with ID '{}' could not correct severity '{}' to a known value"
+                     .format(self.cesa_id, severity))
+    else:
+      logging.warning("CESA with ID '{}' had the severity corrected from '{}' to '{}'"
+                     .format(self.cesa_id, severity, result))
+    return result
+    
   def get_rhsa_id(self):
+    if self.cesa_id is None:
+      return None
     return self.cesa_id.replace(':','-').replace('CE','RH')
   def __str__(self):
     return str({'cesa_id'   : self.cesa_id
@@ -101,6 +154,8 @@ class CESAList:
   # if start_date >= end_date, no matches.
   # if start_date == (end_date - 1), only CESAs from end date are listed
   def __init__(self, start_date, end_date):
+    logging.info("creating CESAList object for daterange '{}' to '{}'"
+                  .format(start_date, end_date))
     self.start_date = start_date + timedelta(days=1)
     self.end_date = end_date
 
@@ -120,40 +175,50 @@ class CESAList:
 
 class CESAMonth:
   def __init__(self, date):
+    logging.info("creating CESAMonth object for daterange month of '{}'"
+                  .format(date))
     self.date = date
 
   def get_announcements(self, filter=None):
-    response = urllib2.urlopen(self._get_url())
+    url = self._get_url()
+    logging.debug("getting URL '{}'".format(url))
+    req = urllib2.Request(url, headers=headers)
+    response = urllib2.urlopen(req)
     if response.getcode() == 200:
-      body = BeautifulSoup(response.read(), 'html.parser').body
-      posts = body.find_all('ul')[1]
+      try:
+        body = BeautifulSoup(response.read(), 'html.parser').body
+        posts = body.find_all('ul')[1]
+      except Exception, e:
+        logging.critical("Failed to read or parse response for CESAs of {} {}"
+                       .format(self._month(), self.date.year))
+        sys.exit(os.EX_NOTFOUND)
       for post in posts.find_all('li'):
         match = cesa_regex.match(post.a.string)
         if match:
-          [cesa_id, severity, centos_version, pkg_name] = map(match.group, xrange(1,5))
-          severity = severity.lower()
-          cesa_url = self._get_cesa_url(post)
-          if filter is None or filter(cesa_id, severity, centos_version, pkg_name, cesa_url):
-            yield self._get_cesa(cesa_id, centos_version, severity, pkg_name, cesa_url)
-    # TODO -- make this an error instead
+          logging.debug("got CESA string: '{}'".format(post.a.string))
+          cesa = self._init_cesa(match, post)
+          if filter is None or filter(cesa):
+            try:
+              yield cesa.set_date(self.date.year, self.date.month).finalize()
+            except Exception, e:
+              logging.critical("Failed to get '{}', exception: {}"
+                              .format(cesa, str(e)))
+              sys.exit(os.EX_SOFTWARE)
+    else:
+      logging.critical("Got a non-200 response code while attempting to list"
+                        " CESAs for {}, {}"
+                        .format(self._month(), self.date.year))
+      sys.exit(os.EX_NOTFOUND)
 
-  def _get_cesa(self, cesa_id, centos_version, severity, pkg_name, cesa_url):
-    body = self._get_cesa_page(cesa_url)
-    if body is None:
-      # TODO -- raise exception
-      pass
-    day = cesa_date_regex.match(body.i.string)
-    if not day:
-      pass
-      # TODO raise exception
-    release_date = date(self.date.year, self.date.month, int(day.group(1)))
-    return CESA(cesa_id = cesa_id
-                ,centos_version = centos_version
-                ,severity = severity
-                ,pkg_name = pkg_name
-                ,url = cesa_url
-                ,date = release_date
-                )
+  def _init_cesa(self, match, post):
+    cesa = CESA()
+    [cesa_id, severity, centos_version, pkg_name] = map(match.group, xrange(1,5))
+    cesa.set_severity(severity.lower())
+    cesa.cesa_id = cesa_id
+    cesa.centos_version = centos_version
+    cesa.pkg_name = pkg_name
+    cesa.url = self._get_cesa_url(post)
+    return cesa
 
   def _get_url(self):
     url = "https://lists.centos.org/pipermail/centos-announce/{}-{}/date.html"
@@ -165,12 +230,4 @@ class CESAMonth:
 
   def _month(self):
     return calendar.month_name[self.date.month]
-
-  def _get_cesa_page(self, url):
-    response = urllib2.urlopen(url)
-    if response.getcode() == 200:
-      return BeautifulSoup(response.read(), 'html.parser').body
-    # TODO -- raise exception
-    return None
-
 

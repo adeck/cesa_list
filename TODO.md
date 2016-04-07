@@ -32,6 +32,9 @@
 
 # Moderate
 
+- figure out how to remove all arguments before the program name so that
+  if someone calls the program as ./cesa/__main__.py or as python cesa
+  it will always fail on at least one type of invocation
 - create debugging options (e.g. 'create logfile', 'log to stderr', 'set
   loglevel')
 - if severity is an unrecognized value, try to cross-check the

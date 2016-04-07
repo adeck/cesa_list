@@ -83,7 +83,7 @@ def parse_args(args):
                       ,dest='daterange'
                       )
   parser.add_argument('--after', metavar='CESA_ID', type=cesa_id
-                      ,help='ignore all CESA IDs prior to the given ID'
+                      ,help='ignore all CESA IDs prior to (and including) the given ID'
                       ,dest='cesa_id'
                       )
   parser.add_argument('--centos-version','--cv', metavar='CENTOS_VERSION', type=int

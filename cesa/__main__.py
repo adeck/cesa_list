@@ -124,7 +124,7 @@ def create_filter(args):
   severity_filter = None
   if args.severity is not None:
     severity_filter = severities.index(args.severity)
-  centos_version_filter = str(args.centos_version)
+  centos_version_filter = args.centos_version
   pkg_filter = args.packages
   # cesa.date is None when this is called
   def filter(cesa):
@@ -141,7 +141,7 @@ def create_filter(args):
       logging.debug('CESA filtered because of severity')
       return False
     if centos_version_filter is not None \
-          and cesa.centos_version != centos_version_filter:
+          and int(cesa.centos_version) != centos_version_filter:
       logging.debug('CESA filtered because of centos version')
       return False
     if pkg_filter is not None and cesa.pkg_name not in pkg_filter:
